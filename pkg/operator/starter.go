@@ -76,8 +76,13 @@ import (
 // masterMachineLabelSelectorString allows for getting only the master machines, it matters in larger installations with many worker nodes
 const masterMachineLabelSelectorString = "machine.openshift.io/cluster-api-machine-role=master"
 
+const arbiterMachineLabelSelectorString = "machine.openshift.io/cluster-api-machine-role=arbiter"
+
 // masterNodeLabelSelectorString allows for getting only the master nodes, it matters in larger installations with many worker nodes
 const masterNodeLabelSelectorString = "node-role.kubernetes.io/master"
+
+// arbiterNodeLabelSelectorString allows for getting only the arbiter node
+const arbiterNodeLabelSelectorString = "node-role.kubernetes.io/arbiter"
 
 const releaseVersionEnvVariableName = "RELEASE_VERSION"
 const missingVersion = "0.0.1-snapshot"
@@ -132,6 +137,24 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 	})
 	masterNodeLister := corev1listers.NewNodeLister(masterNodeInformer.GetIndexer())
 	masterNodeLabelSelector, err := labels.Parse(masterNodeLabelSelectorString)
+	if err != nil {
+		return err
+	}
+
+	arbiterMachineInformer := machineinformersv1beta1.NewFilteredMachineInformer(machineClientSet, "openshift-machine-api", 1*time.Hour, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, func(listOptions *metav1.ListOptions) {
+		listOptions.LabelSelector = arbiterMachineLabelSelectorString
+	})
+	arbiterMachineLabelSelector, err := labels.Parse(arbiterMachineLabelSelectorString)
+	if err != nil {
+		return err
+	}
+	// we create a new informer directly because we are only interested in observing changes to the master nodes
+	// primarily to avoid reconciling on every update in large clusters (~2K nodes)
+	arbiterNodeInformer := corev1informers.NewFilteredNodeInformer(kubeClient, 1*time.Hour, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, func(listOptions *metav1.ListOptions) {
+		listOptions.LabelSelector = arbiterNodeLabelSelectorString
+	})
+	arbiterNodeLister := corev1listers.NewNodeLister(arbiterNodeInformer.GetIndexer())
+	arbiterNodeLabelSelector, err := labels.Parse(arbiterNodeLabelSelectorString)
 	if err != nil {
 		return err
 	}
@@ -203,6 +226,8 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 		kubeInformersForNamespaces,
 		masterNodeInformer,
 		masterNodeLister,
+		arbiterNodeInformer,
+		arbiterNodeLister,
 		resourceSyncController,
 		controllerContext.EventRecorder,
 	)
@@ -234,6 +259,9 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 		masterNodeInformer,
 		masterNodeLister,
 		masterNodeLabelSelector,
+		arbiterNodeInformer,
+		arbiterNodeLister,
+		arbiterNodeLabelSelector,
 		configInformers.Config().V1().Infrastructures(),
 		networkInformer,
 		controllerContext.EventRecorder,
@@ -258,6 +286,7 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 		configInformers.Config().V1().Infrastructures(),
 		networkInformer,
 		masterNodeInformer,
+		arbiterNodeInformer,
 		kubeClient,
 		envVarController,
 		controllerContext.EventRecorder,
@@ -368,6 +397,9 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 		masterNodeInformer,
 		masterNodeLister,
 		masterNodeLabelSelector,
+		arbiterNodeInformer,
+		arbiterNodeLister,
+		arbiterNodeLabelSelector,
 		controllerContext.EventRecorder,
 		legacyregistry.DefaultGatherer.(metrics.KubeRegistry),
 		false,
@@ -380,6 +412,8 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 		kubeInformersForNamespaces,
 		masterNodeLister,
 		masterNodeLabelSelector,
+		arbiterNodeLister,
+		arbiterNodeLabelSelector,
 		controllerContext.EventRecorder,
 	)
 
@@ -509,31 +543,38 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 		return fmt.Errorf("could not sync ClusterVersion, aborting operator start")
 	}
 
-	clusterMemberControllerInformers := []factory.Informer{masterNodeInformer}
-	machineLister := machinelistersv1beta1.NewMachineLister(masterMachineInformer.GetIndexer())
-	machineAPI := ceohelpers.NewMachineAPI(masterMachineInformer, machineLister, masterMachineLabelSelector, clusterVersions, dynamicClient)
-	machineAPIEnabled, err := machineAPI.IsEnabled()
+	clusterMemberControllerInformers := []factory.Informer{masterNodeInformer, arbiterNodeInformer}
+	masterMachineLister := machinelistersv1beta1.NewMachineLister(masterMachineInformer.GetIndexer())
+	masterMachineAPI := ceohelpers.NewMachineAPI(masterMachineInformer, masterMachineLister, masterMachineLabelSelector, clusterVersions, dynamicClient)
+	arbiterMachineLister := machinelistersv1beta1.NewMachineLister(arbiterMachineInformer.GetIndexer())
+	arbiterMachineAPI := ceohelpers.NewMachineAPI(arbiterMachineInformer, arbiterMachineLister, arbiterMachineLabelSelector, clusterVersions, dynamicClient)
+
+	machineAPIEnabled, err := masterMachineAPI.IsEnabled()
 	if err != nil {
 		return fmt.Errorf("could not determine whether machine API is enabled, aborting controller start")
 	}
 
-	machineAPIAvailable, err := machineAPI.IsAvailable()
+	machineAPIAvailable, err := masterMachineAPI.IsAvailable()
 	if err != nil {
 		return fmt.Errorf("could not determine whether machine API is available, aborting controller start")
 	}
 
 	if machineAPIEnabled || machineAPIAvailable {
 		klog.Infof("Detected available machine API, starting vertical scaling related controllers and informers...")
-		clusterMemberControllerInformers = append(clusterMemberControllerInformers, masterMachineInformer)
+		clusterMemberControllerInformers = append(clusterMemberControllerInformers, masterMachineInformer, arbiterMachineInformer)
 		clusterMemberRemovalController := clustermemberremovalcontroller.NewClusterMemberRemovalController(
 			AlivenessChecker,
 			operatorClient,
 			etcdClient,
-			machineAPI,
+			masterMachineAPI,
 			masterMachineLabelSelector, masterNodeLabelSelector,
+			arbiterMachineAPI,
+			arbiterMachineLabelSelector, arbiterNodeLabelSelector,
 			kubeInformersForNamespaces,
 			masterNodeInformer,
 			masterMachineInformer,
+			arbiterNodeInformer,
+			arbiterMachineInformer,
 			networkInformer,
 			kubeInformersForNamespaces.ConfigMapLister(),
 			controllerContext.EventRecorder,
@@ -545,13 +586,17 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 			machineClient,
 			etcdClient,
 			kubeClient,
-			machineAPI,
+			masterMachineAPI,
+			masterMachineLabelSelector,
+			arbiterMachineAPI,
 			masterMachineLabelSelector,
 			kubeInformersForNamespaces,
 			masterMachineInformer,
+			arbiterMachineInformer,
 			controllerContext.EventRecorder)
 
 		go masterMachineInformer.Run(ctx.Done())
+		go arbiterMachineInformer.Run(ctx.Done())
 		go clusterMemberRemovalController.Run(ctx, 1)
 		go machineDeletionHooksController.Run(ctx, 1)
 	}
@@ -560,11 +605,16 @@ func RunOperator(ctx context.Context, controllerContext *controllercmd.Controlle
 	clusterMemberController := clustermembercontroller.NewClusterMemberController(
 		AlivenessChecker,
 		operatorClient,
-		machineAPI,
+		masterMachineAPI,
 		masterNodeLister,
 		masterNodeLabelSelector,
-		machineLister,
+		masterMachineLister,
 		masterMachineLabelSelector,
+		arbiterMachineAPI,
+		arbiterNodeLister,
+		arbiterNodeLabelSelector,
+		arbiterMachineLister,
+		arbiterMachineLabelSelector,
 		kubeInformersForNamespaces,
 		networkInformer,
 		etcdClient,

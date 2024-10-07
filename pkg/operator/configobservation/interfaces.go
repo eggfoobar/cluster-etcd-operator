@@ -14,6 +14,7 @@ type Listers struct {
 	OpenshiftEtcdPodsLister               corelistersv1.PodLister
 	OpenshiftEtcdConfigMapsLister         corelistersv1.ConfigMapLister
 	NodeLister                            corelistersv1.NodeLister
+	ArbiterNodeLister                     corelistersv1.NodeLister
 	ConfigMapListerForKubeSystemNamespace corelistersv1.ConfigMapNamespaceLister
 
 	ResourceSync       resourcesynccontroller.ResourceSyncer

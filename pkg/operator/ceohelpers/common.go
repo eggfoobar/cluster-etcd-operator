@@ -159,7 +159,7 @@ func CurrentMemberMachinesWithDeletionHooks(machineSelector labels.Selector, mac
 //	when the host disappears from the cloud side, it stops updating the Machine so the addresses and information
 //	should persist there as a tombstone as the Machine is marked Failed
 func FindMachineByNodeInternalIP(nodeInternalIP string, machineSelector labels.Selector, machineLister machinelistersv1beta1.MachineLister) (*machinev1beta1.Machine, error) {
-	machines, err := machineLister.List(machineSelector)
+	machines, err := machineLister.List(labels.Everything())
 	if err != nil {
 		return nil, err
 	}

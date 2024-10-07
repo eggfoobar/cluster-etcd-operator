@@ -47,14 +47,16 @@ type EnvVarController struct {
 	targetImagePullSpec string
 	listeners           []Enqueueable
 
-	infrastructureLister    configv1listers.InfrastructureLister
-	networkLister           configv1listers.NetworkLister
-	configmapLister         corev1listers.ConfigMapLister
-	secretLister            corev1listers.SecretLister
-	masterNodeLister        corev1listers.NodeLister
-	masterNodeLabelSelector labels.Selector
-	etcdLister              operatorv1listers.EtcdLister
-	featureGateAccessor     featuregates.FeatureGateAccess
+	infrastructureLister     configv1listers.InfrastructureLister
+	networkLister            configv1listers.NetworkLister
+	configmapLister          corev1listers.ConfigMapLister
+	secretLister             corev1listers.SecretLister
+	masterNodeLister         corev1listers.NodeLister
+	masterNodeLabelSelector  labels.Selector
+	arbiterNodeLister        corev1listers.NodeLister
+	arbiterNodeLabelSelector labels.Selector
+	etcdLister               operatorv1listers.EtcdLister
+	featureGateAccessor      featuregates.FeatureGateAccess
 
 	// queue only ever has one item, but it has nice error handling backoff/retry semantics
 	queue         workqueue.RateLimitingInterface
@@ -73,6 +75,9 @@ func NewEnvVarController(
 	masterNodeInformer cache.SharedIndexInformer,
 	masterNodeLister corev1listers.NodeLister,
 	masterNodeLabelSelector labels.Selector,
+	arbiterNodeInformer cache.SharedIndexInformer,
+	arbiterNodeLister corev1listers.NodeLister,
+	arbiterNodeLabelSelector labels.Selector,
 	infrastructureInformer configv1informers.InfrastructureInformer,
 	networkInformer configv1informers.NetworkInformer,
 	eventRecorder events.Recorder,
@@ -80,16 +85,18 @@ func NewEnvVarController(
 	featureGateAccessor featuregates.FeatureGateAccess,
 ) *EnvVarController {
 	c := &EnvVarController{
-		operatorClient:          operatorClient,
-		infrastructureLister:    infrastructureInformer.Lister(),
-		networkLister:           networkInformer.Lister(),
-		configmapLister:         kubeInformersForNamespaces.InformersFor(operatorclient.TargetNamespace).Core().V1().ConfigMaps().Lister(),
-		secretLister:            kubeInformersForNamespaces.InformersFor(operatorclient.TargetNamespace).Core().V1().Secrets().Lister(),
-		masterNodeLister:        masterNodeLister,
-		masterNodeLabelSelector: masterNodeLabelSelector,
-		targetImagePullSpec:     targetImagePullSpec,
-		etcdLister:              etcdsInformer.Lister(),
-		featureGateAccessor:     featureGateAccessor,
+		operatorClient:           operatorClient,
+		infrastructureLister:     infrastructureInformer.Lister(),
+		networkLister:            networkInformer.Lister(),
+		configmapLister:          kubeInformersForNamespaces.InformersFor(operatorclient.TargetNamespace).Core().V1().ConfigMaps().Lister(),
+		secretLister:             kubeInformersForNamespaces.InformersFor(operatorclient.TargetNamespace).Core().V1().Secrets().Lister(),
+		masterNodeLister:         masterNodeLister,
+		masterNodeLabelSelector:  masterNodeLabelSelector,
+		arbiterNodeLister:        arbiterNodeLister,
+		arbiterNodeLabelSelector: arbiterNodeLabelSelector,
+		targetImagePullSpec:      targetImagePullSpec,
+		etcdLister:               etcdsInformer.Lister(),
+		featureGateAccessor:      featureGateAccessor,
 
 		queue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "EnvVarController"),
 		cachesToSync: []cache.InformerSynced{
@@ -100,6 +107,7 @@ func NewEnvVarController(
 			kubeInformersForNamespaces.InformersFor(operatorclient.TargetNamespace).Core().V1().Secrets().Informer().HasSynced,
 			kubeInformersForNamespaces.InformersFor(operatorclient.TargetNamespace).Core().V1().ConfigMaps().Informer().HasSynced,
 			masterNodeInformer.HasSynced,
+			arbiterNodeInformer.HasSynced,
 			etcdsInformer.Informer().HasSynced,
 		},
 		eventRecorder: eventRecorder.WithComponentSuffix("env-var-controller"),
@@ -113,6 +121,7 @@ func NewEnvVarController(
 	kubeInformersForNamespaces.InformersFor(operatorclient.TargetNamespace).Core().V1().ConfigMaps().Informer().AddEventHandler(c.eventHandler())
 	etcdsInformer.Informer().AddEventHandler(c.eventHandler())
 	masterNodeInformer.AddEventHandler(c.eventHandler())
+	arbiterNodeInformer.AddEventHandler(c.eventHandler())
 
 	return c
 }
@@ -163,16 +172,18 @@ func (c *EnvVarController) checkEnvVars() error {
 	}
 
 	currEnvVarMap, err := getEtcdEnvVars(envVarContext{
-		targetImagePullSpec:     c.targetImagePullSpec,
-		spec:                    *operatorSpec,
-		status:                  *operatorStatus,
-		configmapLister:         c.configmapLister,
-		masterNodeLister:        c.masterNodeLister,
-		masterNodeLabelSelector: c.masterNodeLabelSelector,
-		infrastructureLister:    c.infrastructureLister,
-		networkLister:           c.networkLister,
-		etcdLister:              c.etcdLister,
-		featureGateAccessor:     c.featureGateAccessor,
+		targetImagePullSpec:      c.targetImagePullSpec,
+		spec:                     *operatorSpec,
+		status:                   *operatorStatus,
+		configmapLister:          c.configmapLister,
+		masterNodeLister:         c.masterNodeLister,
+		masterNodeLabelSelector:  c.masterNodeLabelSelector,
+		arbiterNodeLister:        c.arbiterNodeLister,
+		arbiterNodeLabelSelector: c.arbiterNodeLabelSelector,
+		infrastructureLister:     c.infrastructureLister,
+		networkLister:            c.networkLister,
+		etcdLister:               c.etcdLister,
+		featureGateAccessor:      c.featureGateAccessor,
 	})
 	if err != nil {
 		return err

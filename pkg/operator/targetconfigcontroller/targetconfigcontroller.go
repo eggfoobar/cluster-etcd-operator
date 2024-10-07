@@ -67,6 +67,7 @@ func NewTargetConfigController(
 	infrastructureInformer configv1informers.InfrastructureInformer,
 	networkInformer configv1informers.NetworkInformer,
 	masterNodeInformer cache.SharedIndexInformer,
+	arbiterNodeInformer cache.SharedIndexInformer,
 	kubeClient kubernetes.Interface,
 	envVarGetter etcdenvvar.EnvVar,
 	eventRecorder events.Recorder,
@@ -99,6 +100,7 @@ func NewTargetConfigController(
 			kubeInformersForOpenshiftEtcdNamespace.Core().V1().ConfigMaps().Informer(),
 			kubeInformersForOpenshiftEtcdNamespace.Core().V1().Secrets().Informer(),
 			masterNodeInformer,
+			arbiterNodeInformer,
 			infrastructureInformer.Informer(),
 			networkInformer.Informer(),
 		).ToController("TargetConfigController", syncCtx.Recorder())

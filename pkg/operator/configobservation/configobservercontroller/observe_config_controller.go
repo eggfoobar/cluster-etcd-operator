@@ -29,6 +29,8 @@ func NewConfigObserver(
 	kubeInformersForNamespaces v1helpers.KubeInformersForNamespaces,
 	masterNodeInformer cache.SharedIndexInformer,
 	masterNodeLister corev1listers.NodeLister,
+	arbiterNodeInformer cache.SharedIndexInformer,
+	arbiterNodeLister corev1listers.NodeLister,
 	resourceSyncer resourcesynccontroller.ResourceSyncer,
 	eventRecorder events.Recorder,
 ) *ConfigObserver {
@@ -52,6 +54,7 @@ func NewConfigObserver(
 		kubeInformersForNamespaces.InformersFor("openshift-etcd").Core().V1().Pods().Informer(),
 		kubeInformersForNamespaces.InformersFor("openshift-etcd").Core().V1().ConfigMaps().Informer(),
 		masterNodeInformer,
+		arbiterNodeInformer,
 	}
 
 	for _, ns := range interestingNamespaces {
@@ -70,6 +73,7 @@ func NewConfigObserver(
 				OpenshiftEtcdPodsLister:               kubeInformersForNamespaces.InformersFor("openshift-etcd").Core().V1().Pods().Lister(),
 				OpenshiftEtcdConfigMapsLister:         kubeInformersForNamespaces.InformersFor("openshift-etcd").Core().V1().ConfigMaps().Lister(),
 				NodeLister:                            masterNodeLister,
+				ArbiterNodeLister:                     arbiterNodeLister,
 				ConfigMapListerForKubeSystemNamespace: kubeInformersForNamespaces.InformersFor("kube-system").Core().V1().ConfigMaps().Lister().ConfigMaps("kube-system"),
 
 				ResourceSync: resourceSyncer,
@@ -82,6 +86,7 @@ func NewConfigObserver(
 					kubeInformersForNamespaces.InformersFor("openshift-etcd").Core().V1().Pods().Informer().HasSynced,
 					kubeInformersForNamespaces.InformersFor("openshift-etcd").Core().V1().ConfigMaps().Informer().HasSynced,
 					masterNodeInformer.HasSynced,
+					arbiterNodeInformer.HasSynced,
 				),
 			},
 			informers,

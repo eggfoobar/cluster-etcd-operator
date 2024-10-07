@@ -67,16 +67,18 @@ type nodeCertConfigs struct {
 }
 
 type EtcdCertSignerController struct {
-	eventRecorder      events.Recorder
-	kubeClient         kubernetes.Interface
-	operatorClient     v1helpers.StaticPodOperatorClient
-	masterNodeLister   corev1listers.NodeLister
-	masterNodeSelector labels.Selector
-	secretInformer     corev1informers.SecretInformer
-	secretLister       corev1listers.SecretLister
-	secretClient       corev1client.SecretsGetter
-	configMapClient    corev1client.ConfigMapsGetter
-	configmapLister    corev1listers.ConfigMapLister
+	eventRecorder       events.Recorder
+	kubeClient          kubernetes.Interface
+	operatorClient      v1helpers.StaticPodOperatorClient
+	masterNodeLister    corev1listers.NodeLister
+	masterNodeSelector  labels.Selector
+	arbiterNodeLister   corev1listers.NodeLister
+	arbiterNodeSelector labels.Selector
+	secretInformer      corev1informers.SecretInformer
+	secretLister        corev1listers.SecretLister
+	secretClient        corev1client.SecretsGetter
+	configMapClient     corev1client.ConfigMapsGetter
+	configmapLister     corev1listers.ConfigMapLister
 
 	// when true we skip all checks related to the rollout of static pods, this is used in render
 	forceSkipRollout bool
@@ -99,6 +101,9 @@ func NewEtcdCertSignerController(
 	masterNodeInformer cache.SharedIndexInformer,
 	masterNodeLister corev1listers.NodeLister,
 	masterNodeSelector labels.Selector,
+	arbiterNodeInformer cache.SharedIndexInformer,
+	arbiterNodeLister corev1listers.NodeLister,
+	arbiterNodeSelector labels.Selector,
 	eventRecorder events.Recorder,
 	metricsRegistry metrics.KubeRegistry,
 	forceSkipRollout bool,
@@ -153,15 +158,17 @@ func NewEtcdCertSignerController(
 	metricsRegistry.MustRegister(signerExpirationGauge)
 
 	c := &EtcdCertSignerController{
-		eventRecorder:      eventRecorder,
-		kubeClient:         kubeClient,
-		operatorClient:     operatorClient,
-		masterNodeLister:   masterNodeLister,
-		masterNodeSelector: masterNodeSelector,
-		secretInformer:     secretInformer,
-		secretLister:       secretLister,
-		secretClient:       secretClient,
-		configMapClient:    cmGetter,
+		eventRecorder:       eventRecorder,
+		kubeClient:          kubeClient,
+		operatorClient:      operatorClient,
+		masterNodeLister:    masterNodeLister,
+		masterNodeSelector:  masterNodeSelector,
+		arbiterNodeLister:   arbiterNodeLister,
+		arbiterNodeSelector: arbiterNodeSelector,
+		secretInformer:      secretInformer,
+		secretLister:        secretLister,
+		secretClient:        secretClient,
+		configMapClient:     cmGetter,
 		// this one can go through the informers, it's only used for bootstrap checks
 		configmapLister:       kubeInformers.InformersFor(operatorclient.KubeSystemNamespace).Core().V1().ConfigMaps().Lister(),
 		certConfig:            certCfg,
@@ -174,6 +181,7 @@ func NewEtcdCertSignerController(
 
 	return factory.New().ResyncEvery(time.Minute).WithInformers(
 		masterNodeInformer,
+		arbiterNodeInformer,
 		kubeInformers.InformersFor(operatorclient.GlobalUserSpecifiedConfigNamespace).Core().V1().Secrets().Informer(),
 		kubeInformers.InformersFor(operatorclient.KubeSystemNamespace).Core().V1().ConfigMaps().Informer(),
 		cmInformer.Informer(),
@@ -476,6 +484,13 @@ func (c *EtcdCertSignerController) createNodeCertConfigs() ([]*nodeCertConfigs, 
 		return cfgs, err
 	}
 
+	arbiterNodes, err := c.arbiterNodeLister.List(c.arbiterNodeSelector)
+	if err != nil {
+		return cfgs, err
+	}
+
+	nodes = append(nodes, arbiterNodes...)
+
 	for _, node := range nodes {
 		peerCert, err := tlshelpers.CreatePeerCertificate(node,
 			c.secretInformer,
@@ -526,6 +541,13 @@ func (c *EtcdCertSignerController) hasNodeCertDiff() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
+	arbiterNodes, err := c.arbiterNodeLister.List(c.arbiterNodeSelector)
+	if err != nil {
+		return false, err
+	}
+
+	nodes = append(nodes, arbiterNodes...)
 
 	allSecrets, err := c.secretLister.Secrets(operatorclient.TargetNamespace).Get(tlshelpers.EtcdAllCertsSecretName)
 	if err != nil {

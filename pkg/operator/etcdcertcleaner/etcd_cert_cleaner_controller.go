@@ -35,15 +35,17 @@ var dynamicCertPrefixes = []string{
 // EtcdCertCleanerController will clean up old and unused dynamically generated ("node-based") secrets.
 // This is to avoid filling up etcd in environments where the control plane is rotated/scaled up and down very often.
 type EtcdCertCleanerController struct {
-	eventRecorder      events.Recorder
-	kubeClient         kubernetes.Interface
-	operatorClient     v1helpers.StaticPodOperatorClient
-	masterNodeLister   corev1listers.NodeLister
-	masterNodeSelector labels.Selector
-	secretInformer     corev1informers.SecretInformer
-	secretLister       corev1listers.SecretLister
-	secretClient       corev1client.SecretsGetter
-	quorumChecker      ceohelpers.QuorumChecker
+	eventRecorder       events.Recorder
+	kubeClient          kubernetes.Interface
+	operatorClient      v1helpers.StaticPodOperatorClient
+	masterNodeLister    corev1listers.NodeLister
+	masterNodeSelector  labels.Selector
+	arbiterNodeLister   corev1listers.NodeLister
+	arbiterNodeSelector labels.Selector
+	secretInformer      corev1informers.SecretInformer
+	secretLister        corev1listers.SecretLister
+	secretClient        corev1client.SecretsGetter
+	quorumChecker       ceohelpers.QuorumChecker
 }
 
 func NewEtcdCertCleanerController(
@@ -53,6 +55,8 @@ func NewEtcdCertCleanerController(
 	kubeInformers v1helpers.KubeInformersForNamespaces,
 	masterNodeLister corev1listers.NodeLister,
 	masterNodeSelector labels.Selector,
+	arbiterNodeLister corev1listers.NodeLister,
+	arbiterNodeSelector labels.Selector,
 	eventRecorder events.Recorder,
 ) factory.Controller {
 	secretInformer := kubeInformers.InformersFor(operatorclient.TargetNamespace).Core().V1().Secrets()
@@ -60,14 +64,16 @@ func NewEtcdCertCleanerController(
 	secretClient := v1helpers.CachedSecretGetter(kubeClient.CoreV1(), kubeInformers)
 
 	c := &EtcdCertCleanerController{
-		eventRecorder:      eventRecorder,
-		kubeClient:         kubeClient,
-		operatorClient:     operatorClient,
-		masterNodeLister:   masterNodeLister,
-		masterNodeSelector: masterNodeSelector,
-		secretInformer:     secretInformer,
-		secretLister:       secretLister,
-		secretClient:       secretClient,
+		eventRecorder:       eventRecorder,
+		kubeClient:          kubeClient,
+		operatorClient:      operatorClient,
+		masterNodeLister:    masterNodeLister,
+		masterNodeSelector:  masterNodeSelector,
+		arbiterNodeLister:   arbiterNodeLister,
+		arbiterNodeSelector: arbiterNodeSelector,
+		secretInformer:      secretInformer,
+		secretLister:        secretLister,
+		secretClient:        secretClient,
 	}
 
 	// we estimate the rate of control plane scales to maybe 1-2 a day, so running this once an hour with 6h of health threshold
@@ -108,6 +114,13 @@ func (c *EtcdCertCleanerController) findUnusedNodeBasedSecrets(ctx context.Conte
 	if err != nil {
 		return nil, fmt.Errorf("EtcdCertCleanerController: could not list control plane nodes, error was: %w", err)
 	}
+
+	arbiterNodes, err := c.arbiterNodeLister.List(c.arbiterNodeSelector)
+	if err != nil {
+		return nil, fmt.Errorf("EtcdCertCleanerController: could not list control plane nodes, error was: %w", err)
+	}
+
+	nodes = append(nodes, arbiterNodes...)
 
 	var existingNodeSecrets []*corev1.Secret
 	for _, n := range nodes {

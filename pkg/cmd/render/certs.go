@@ -48,6 +48,11 @@ func createCertSecrets(nodes []*corev1.Node) ([]corev1.Secret, []corev1.ConfigMa
 		return nil, nil, fmt.Errorf("could not parse master node labels: %w", err)
 	}
 
+	arbiterSelector, err := labels.Parse("node-role.kubernetes.io/arbiter")
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not parse master node labels: %w", err)
+	}
+
 	controller := etcdcertsigner.NewEtcdCertSignerController(
 		health.NewMultiAlivenessChecker(),
 		fakeKubeClient,
@@ -56,6 +61,9 @@ func createCertSecrets(nodes []*corev1.Node) ([]corev1.Secret, []corev1.ConfigMa
 		kubeInformers.InformersFor("").Core().V1().Nodes().Informer(),
 		kubeInformers.InformersFor("").Core().V1().Nodes().Lister(),
 		nodeSelector,
+		kubeInformers.InformersFor("").Core().V1().Nodes().Informer(),
+		kubeInformers.InformersFor("").Core().V1().Nodes().Lister(),
+		arbiterSelector,
 		recorder,
 		metrics.NewKubeRegistry(),
 		true)

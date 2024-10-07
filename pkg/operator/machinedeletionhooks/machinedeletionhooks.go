@@ -31,13 +31,16 @@ type machineDeletionHooksController struct {
 	etcdClient                            etcdcli.EtcdClient
 	machineClient                         machinev1beta1client.MachineInterface
 	masterMachineLister                   machinelistersv1beta1.MachineLister
+	arbiterMachineLister                  machinelistersv1beta1.MachineLister
 	kubeClient                            kubernetes.Interface
 	configMapListerForKubeSystemNamespace corev1listers.ConfigMapNamespaceLister
 	podListerForOpenShiftEtcdNamespace    corev1listers.PodNamespaceLister
 	// machineAPIChecker determines if the precondition for this controller is met,
 	// this controller can be run only on a cluster that exposes a functional Machine API
-	machineAPIChecker     ceohelpers.MachineAPIChecker
-	masterMachineSelector labels.Selector
+	machineAPIChecker        ceohelpers.MachineAPIChecker
+	masterMachineSelector    labels.Selector
+	arbiterMachineAPIChecker ceohelpers.MachineAPIChecker
+	arbiterMachineSelector   labels.Selector
 }
 
 // NewMachineDeletionHooksController reconciles machine hooks for master machines
@@ -54,8 +57,11 @@ func NewMachineDeletionHooksController(
 	kubeClient kubernetes.Interface,
 	machineAPIChecker ceohelpers.MachineAPIChecker,
 	masterMachineSelector labels.Selector,
+	arbiterMachineAPIChecker ceohelpers.MachineAPIChecker,
+	arbiterMachineSelector labels.Selector,
 	kubeInformersForNamespaces operatorv1helpers.KubeInformersForNamespaces,
 	masterMachineInformer cache.SharedIndexInformer,
+	arbiterMachineInformer cache.SharedIndexInformer,
 	eventRecorder events.Recorder) factory.Controller {
 	c := &machineDeletionHooksController{
 		machineClient:                         machineClient,
@@ -64,6 +70,9 @@ func NewMachineDeletionHooksController(
 		machineAPIChecker:                     machineAPIChecker,
 		masterMachineSelector:                 masterMachineSelector,
 		masterMachineLister:                   machinelistersv1beta1.NewMachineLister(masterMachineInformer.GetIndexer()),
+		arbiterMachineAPIChecker:              arbiterMachineAPIChecker,
+		arbiterMachineSelector:                arbiterMachineSelector,
+		arbiterMachineLister:                  machinelistersv1beta1.NewMachineLister(arbiterMachineInformer.GetIndexer()),
 		configMapListerForKubeSystemNamespace: kubeInformersForNamespaces.InformersFor("kube-system").Core().V1().ConfigMaps().Lister().ConfigMaps("kube-system"),
 		podListerForOpenShiftEtcdNamespace:    kubeInformersForNamespaces.InformersFor("openshift-etcd").Core().V1().Pods().Lister().Pods("openshift-etcd"),
 	}
@@ -85,6 +94,11 @@ func NewMachineDeletionHooksController(
 func (c *machineDeletionHooksController) sync(ctx context.Context, syncCtx factory.SyncContext) error {
 	// stop if the machine API is not functional
 	if isFunctional, err := c.machineAPIChecker.IsFunctional(); err != nil {
+		return err
+	} else if !isFunctional {
+		return nil
+	}
+	if isFunctional, err := c.arbiterMachineAPIChecker.IsFunctional(); err != nil {
 		return err
 	} else if !isFunctional {
 		return nil
@@ -114,6 +128,14 @@ func (c *machineDeletionHooksController) attemptToDeleteMachineDeletionHook(ctx 
 	if err != nil {
 		return err
 	}
+
+	arbiterMachines, err := c.arbiterMachineLister.List(c.arbiterMachineSelector)
+	if err != nil {
+		return err
+	}
+
+	masterMachines = append(masterMachines, arbiterMachines...)
+
 	// machines with the deletion hooks are the ones that host etcd members
 	machinesWithHooks := ceohelpers.FilterMachinesWithMachineDeletionHook(masterMachines)
 
@@ -177,6 +199,13 @@ func (c *machineDeletionHooksController) attemptToDeleteQuorumGuard(ctx context.
 		return err
 	}
 
+	arbiterMachines, err := c.arbiterMachineLister.List(c.arbiterMachineSelector)
+	if err != nil {
+		return err
+	}
+
+	masterMachines = append(masterMachines, arbiterMachines...)
+
 	machinesPendingDeletion := ceohelpers.FilterMachinesPendingDeletion(masterMachines)
 	machinesPendingDeletionWithoutHooks := ceohelpers.FilterMachinesWithoutMachineDeletionHook(machinesPendingDeletion)
 	if len(machinesPendingDeletionWithoutHooks) == 0 {
@@ -238,6 +267,14 @@ func (c *machineDeletionHooksController) addDeletionHookToMasterMachines(ctx con
 	if err != nil {
 		return err
 	}
+
+	arbiterMachines, err := c.arbiterMachineLister.List(c.arbiterMachineSelector)
+	if err != nil {
+		return err
+	}
+
+	masterMachines = append(masterMachines, arbiterMachines...)
+
 	var errs []error
 	for _, masterMachine := range masterMachines {
 		if masterMachine.DeletionTimestamp != nil {

@@ -52,6 +52,14 @@ type ClusterMemberController struct {
 
 	masterNodeLister   corev1listers.NodeLister
 	masterNodeSelector labels.Selector
+
+	arbiterMachineAPIChecker ceohelpers.MachineAPIChecker
+
+	arbiterMachineLister   machinelistersv1beta1.MachineLister
+	arbiterMachineSelector labels.Selector
+
+	arbiterNodeLister   corev1listers.NodeLister
+	arbiterNodeSelector labels.Selector
 }
 
 func NewClusterMemberController(
@@ -62,22 +70,32 @@ func NewClusterMemberController(
 	masterNodeSelector labels.Selector,
 	machineLister machinelistersv1beta1.MachineLister,
 	masterMachineSelector labels.Selector,
+	arbiterMachineAPIChecker ceohelpers.MachineAPIChecker,
+	arbiterNodeLister corev1listers.NodeLister,
+	arbiterNodeSelector labels.Selector,
+	arbiterMachineLister machinelistersv1beta1.MachineLister,
+	arbiterMachineSelector labels.Selector,
 	kubeInformers v1helpers.KubeInformersForNamespaces,
 	networkInformer configv1informers.NetworkInformer,
 	etcdClient etcdcli.EtcdClient,
 	eventRecorder events.Recorder,
 	additionalInformers ...factory.Informer) factory.Controller {
 	c := &ClusterMemberController{
-		operatorClient:        operatorClient,
-		machineAPIChecker:     machineAPIChecker,
-		etcdClient:            etcdClient,
-		podLister:             kubeInformers.InformersFor(operatorclient.TargetNamespace).Core().V1().Pods().Lister(),
-		networkLister:         networkInformer.Lister(),
-		masterMachineLister:   machineLister,
-		masterMachineSelector: masterMachineSelector,
-		masterNodeLister:      masterNodeLister,
-		masterNodeSelector:    masterNodeSelector,
-		configMapLister:       kubeInformers.InformersFor(operatorclient.TargetNamespace).Core().V1().ConfigMaps().Lister().ConfigMaps(operatorclient.TargetNamespace),
+		operatorClient:           operatorClient,
+		machineAPIChecker:        machineAPIChecker,
+		arbiterMachineAPIChecker: arbiterMachineAPIChecker,
+		etcdClient:               etcdClient,
+		podLister:                kubeInformers.InformersFor(operatorclient.TargetNamespace).Core().V1().Pods().Lister(),
+		networkLister:            networkInformer.Lister(),
+		masterMachineLister:      machineLister,
+		masterMachineSelector:    masterMachineSelector,
+		masterNodeLister:         masterNodeLister,
+		masterNodeSelector:       masterNodeSelector,
+		arbiterMachineLister:     arbiterMachineLister,
+		arbiterMachineSelector:   arbiterMachineSelector,
+		arbiterNodeLister:        arbiterNodeLister,
+		arbiterNodeSelector:      arbiterNodeSelector,
+		configMapLister:          kubeInformers.InformersFor(operatorclient.TargetNamespace).Core().V1().ConfigMaps().Lister().ConfigMaps(operatorclient.TargetNamespace),
 	}
 
 	syncer := health.NewDefaultCheckingSyncWrapper(c.sync)
@@ -142,6 +160,12 @@ func (c *ClusterMemberController) getEtcdPeerURLToAdd(ctx context.Context) (stri
 		return "", err
 	}
 
+	arbiterNodes, err := c.arbiterNodeLister.List(c.arbiterNodeSelector)
+	if err != nil {
+		return "", err
+	}
+	nodes = append(nodes, arbiterNodes...)
+
 	nonVotingMemberNodes, err := c.allNodesMapToVotingMembers(nodes)
 	if err != nil {
 		return "", fmt.Errorf("failed to map nodes to voting members: %v", err)
@@ -198,6 +222,23 @@ func (c *ClusterMemberController) getEtcdPeerURLToAdd(ctx context.Context) (stri
 			return peerURL, nil
 		}
 
+		isMachineAPIFunctional, err = c.arbiterMachineAPIChecker.IsFunctional()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to determine Machine API availability: %v", err))
+			continue
+		}
+		if !isMachineAPIFunctional {
+			runningNotReady, err := c.isEtcdContainerRunningNotReady(node)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("failed to check if pod is running and not ready: %v", err))
+				continue
+			}
+			if !runningNotReady {
+				continue
+			}
+			return peerURL, nil
+		}
+
 		// If the Machine API is functional we should ignore the machine
 		// if it is pending deletion to avoid re-adding previously removed members
 		internalIP, err := c.getInternalIPForNode(node)
@@ -208,6 +249,13 @@ func (c *ClusterMemberController) getEtcdPeerURLToAdd(ctx context.Context) (stri
 		machine, err := ceohelpers.FindMachineByNodeInternalIP(internalIP, c.masterMachineSelector, c.masterMachineLister)
 		if err != nil {
 			return "", fmt.Errorf("failed to get machine for node (%s): %v", node.Name, err)
+		}
+		arbiterMachine, err := ceohelpers.FindMachineByNodeInternalIP(internalIP, c.arbiterMachineSelector, c.arbiterMachineLister)
+		if err != nil {
+			return "", fmt.Errorf("failed to get machine for node (%s): %v", node.Name, err)
+		}
+		if machine == nil {
+			machine = arbiterMachine
 		}
 		if machine == nil {
 			klog.V(2).Infof("Ignoring node (%s) for scale-up: no Machine found referencing this node's internal IP (%v)", node.Name, internalIP)
@@ -253,6 +301,11 @@ func (c *ClusterMemberController) ensureEtcdLearnerPromotion(ctx context.Context
 	if err != nil {
 		return err
 	}
+	arbiterNodes, err := c.arbiterNodeLister.List(c.arbiterNodeSelector)
+	if err != nil {
+		return err
+	}
+	nodes = append(nodes, arbiterNodes...)
 
 	nonVotingMemberNodes, err := c.allNodesMapToVotingMembers(nodes)
 	if err != nil {
@@ -319,6 +372,14 @@ func (c *ClusterMemberController) shouldPromote(member *etcdserverpb.Member) (bo
 		return true, nil
 	}
 
+	isMachineAPIFunctional, err = c.arbiterMachineAPIChecker.IsFunctional()
+	if err != nil {
+		return false, fmt.Errorf("failed to determine Machine API availability: %v", err)
+	}
+	if !isMachineAPIFunctional {
+		return true, nil
+	}
+
 	// The learner member's Machine must have a PreDrain hook blocking deletion before we can promote it
 	// All learner Machines should eventually be reconciled by the deletion hooks controller to have PreDrain hooks if missing
 	nodeInternalIP, err := ceohelpers.MemberToNodeInternalIP(member)
@@ -329,6 +390,11 @@ func (c *ClusterMemberController) shouldPromote(member *etcdserverpb.Member) (bo
 	if err != nil {
 		return false, fmt.Errorf("failed to get master machines: %v", err)
 	}
+	arbiterMachines, err := ceohelpers.CurrentMemberMachinesWithDeletionHooks(c.arbiterMachineSelector, c.arbiterMachineLister)
+	if err != nil {
+		return false, fmt.Errorf("failed to get master machines: %v", err)
+	}
+	machines = append(machines, arbiterMachines...)
 	nodeIPToMachinesWithDeletionHooks := ceohelpers.IndexMachinesByNodeInternalIP(machines)
 
 	machine, hasMachine := nodeIPToMachinesWithDeletionHooks[nodeInternalIP]

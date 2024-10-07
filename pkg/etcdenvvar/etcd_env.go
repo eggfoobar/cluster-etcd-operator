@@ -31,14 +31,16 @@ type envVarContext struct {
 	spec   operatorv1.StaticPodOperatorSpec
 	status operatorv1.StaticPodOperatorStatus
 
-	masterNodeLister        corev1listers.NodeLister
-	masterNodeLabelSelector labels.Selector
-	infrastructureLister    configv1listers.InfrastructureLister
-	networkLister           configv1listers.NetworkLister
-	configmapLister         corev1listers.ConfigMapLister
-	targetImagePullSpec     string
-	etcdLister              operatorv1listers.EtcdLister
-	featureGateAccessor     featuregates.FeatureGateAccess
+	masterNodeLister         corev1listers.NodeLister
+	masterNodeLabelSelector  labels.Selector
+	arbiterNodeLister        corev1listers.NodeLister
+	arbiterNodeLabelSelector labels.Selector
+	infrastructureLister     configv1listers.InfrastructureLister
+	networkLister            configv1listers.NetworkLister
+	configmapLister          corev1listers.ConfigMapLister
+	targetImagePullSpec      string
+	etcdLister               operatorv1listers.EtcdLister
+	featureGateAccessor      featuregates.FeatureGateAccess
 }
 
 var FixedEtcdEnvVars = map[string]string{

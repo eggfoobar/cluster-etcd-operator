@@ -39,6 +39,8 @@ type clusterMemberRemovalController struct {
 	etcdClient                        etcdcli.EtcdClient
 	masterNodeLister                  corev1listers.NodeLister
 	masterMachineLister               machinelistersv1beta1.MachineLister
+	arbiterNodeLister                 corev1listers.NodeLister
+	arbiterMachineLister              machinelistersv1beta1.MachineLister
 	networkLister                     configv1listers.NetworkLister
 	configMapListerForTargetNamespace corev1listers.ConfigMapNamespaceLister
 	// machineAPIChecker determines if the precondition for this controller is met,
@@ -46,7 +48,12 @@ type clusterMemberRemovalController struct {
 	machineAPIChecker     ceohelpers.MachineAPIChecker
 	masterMachineSelector labels.Selector
 	masterNodeSelector    labels.Selector
-	configMapLister       corev1listers.ConfigMapLister
+
+	arbiterMachineAPIChecker ceohelpers.MachineAPIChecker
+	arbiterMachineSelector   labels.Selector
+	arbiterNodeSelector      labels.Selector
+
+	configMapLister corev1listers.ConfigMapLister
 
 	lastTimeScaleDownEventWasSent time.Time
 }
@@ -64,21 +71,32 @@ func NewClusterMemberRemovalController(
 	etcdClient etcdcli.EtcdClient,
 	machineAPIChecker ceohelpers.MachineAPIChecker,
 	masterMachineSelector labels.Selector, masterNodeSelector labels.Selector,
+	arbitermachineAPIChecker ceohelpers.MachineAPIChecker,
+	arbiterMachineSelector labels.Selector, arbiterNodeSelector labels.Selector,
 	kubeInformersForNamespaces operatorv1helpers.KubeInformersForNamespaces,
 	masterNodeInformer cache.SharedIndexInformer,
 	masterMachineInformer cache.SharedIndexInformer,
+	arbiterNodeInformer cache.SharedIndexInformer,
+	arbiterMachineInformer cache.SharedIndexInformer,
 	networkInformer configv1informers.NetworkInformer,
 	configMapLister corev1listers.ConfigMapLister,
 	eventRecorder events.Recorder,
 ) factory.Controller {
 	c := &clusterMemberRemovalController{
-		operatorClient:                    operatorClient,
-		etcdClient:                        etcdClient,
-		machineAPIChecker:                 machineAPIChecker,
-		masterMachineSelector:             masterMachineSelector,
-		masterNodeSelector:                masterNodeSelector,
-		masterNodeLister:                  corev1listers.NewNodeLister(masterNodeInformer.GetIndexer()),
-		masterMachineLister:               machinelistersv1beta1.NewMachineLister(masterMachineInformer.GetIndexer()),
+		operatorClient:        operatorClient,
+		etcdClient:            etcdClient,
+		machineAPIChecker:     machineAPIChecker,
+		masterMachineSelector: masterMachineSelector,
+		masterNodeSelector:    masterNodeSelector,
+		masterNodeLister:      corev1listers.NewNodeLister(masterNodeInformer.GetIndexer()),
+		masterMachineLister:   machinelistersv1beta1.NewMachineLister(masterMachineInformer.GetIndexer()),
+
+		arbiterMachineAPIChecker: arbitermachineAPIChecker,
+		arbiterMachineSelector:   arbiterMachineSelector,
+		arbiterNodeSelector:      arbiterNodeSelector,
+		arbiterNodeLister:        corev1listers.NewNodeLister(arbiterNodeInformer.GetIndexer()),
+		arbiterMachineLister:     machinelistersv1beta1.NewMachineLister(arbiterMachineInformer.GetIndexer()),
+
 		networkLister:                     networkInformer.Lister(),
 		configMapListerForTargetNamespace: kubeInformersForNamespaces.InformersFor(operatorclient.TargetNamespace).Core().V1().ConfigMaps().Lister().ConfigMaps(operatorclient.TargetNamespace),
 		configMapLister:                   configMapLister,
@@ -111,6 +129,12 @@ func (c *clusterMemberRemovalController) sync(ctx context.Context, syncCtx facto
 
 	// only attempt to scale down if the machine API is functional
 	if isFunctional, err := c.machineAPIChecker.IsFunctional(); err != nil {
+		return err
+	} else if !isFunctional {
+		return nil
+	}
+
+	if isFunctional, err := c.arbiterMachineAPIChecker.IsFunctional(); err != nil {
 		return err
 	} else if !isFunctional {
 		return nil
@@ -161,6 +185,13 @@ func (c *clusterMemberRemovalController) attemptToScaleDown(ctx context.Context,
 	if err != nil {
 		return fmt.Errorf("could not find master machines with deletion hook: %w", err)
 	}
+
+	arbiterMemberMachines, err := ceohelpers.CurrentMemberMachinesWithDeletionHooks(c.arbiterMachineSelector, c.arbiterMachineLister)
+	if err != nil {
+		return fmt.Errorf("could not find master machines with deletion hook: %w", err)
+	}
+
+	memberMachines = append(memberMachines, arbiterMemberMachines...)
 
 	var votingMembersMachines []*machinev1beta1.Machine
 	for memberMachineIP, memberMachine := range ceohelpers.IndexMachinesByNodeInternalIP(memberMachines) {
@@ -331,6 +362,11 @@ func (c *clusterMemberRemovalController) attemptToRemoveLearningMember(ctx conte
 	if err != nil {
 		return fmt.Errorf("could not find master machines with deletion hook: %w", err)
 	}
+	arbiterMemberMachines, err := ceohelpers.CurrentMemberMachinesWithDeletionHooks(c.arbiterMachineSelector, c.arbiterMachineLister)
+	if err != nil {
+		return fmt.Errorf("could not find master machines with deletion hook: %w", err)
+	}
+	memberMachines = append(memberMachines, arbiterMemberMachines...)
 	var learningMachines []*machinev1beta1.Machine
 	for memberMachineIP, memberMachine := range ceohelpers.IndexMachinesByNodeInternalIP(memberMachines) {
 		if !currentVotingMemberIPListSet.Has(memberMachineIP) {
@@ -383,6 +419,12 @@ func (c *clusterMemberRemovalController) getMachineForMember(memberInternalIP st
 		if err != nil {
 			return nil, err
 		}
+		if machine == nil {
+			machine, err = ceohelpers.FindMachineByNodeInternalIP(nodeInternalIP, c.arbiterMachineSelector, c.arbiterMachineLister)
+			if err != nil {
+				return nil, err
+			}
+		}
 		return machine, nil
 	}
 
@@ -390,6 +432,13 @@ func (c *clusterMemberRemovalController) getMachineForMember(memberInternalIP st
 	if err != nil {
 		return nil, err
 	}
+
+	arbiterMachines, err := c.arbiterMachineLister.List(c.arbiterMachineSelector)
+	if err != nil {
+		return nil, err
+	}
+
+	machines = append(machines, arbiterMachines...)
 	for _, machine := range machines {
 		if machine.Status.NodeRef != nil && machine.Status.NodeRef.Name == node.Name {
 			return machine, nil
@@ -404,12 +453,19 @@ func (c *clusterMemberRemovalController) getNodeForMember(memberInternalIP strin
 		return nil, err
 	}
 
+	arbiterNodes, err := c.arbiterNodeLister.List(c.arbiterNodeSelector)
+	if err != nil {
+		return nil, err
+	}
+
+	controlplaneNodes := append(masterNodes, arbiterNodes...)
+
 	network, err := c.networkLister.Get("cluster")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cluster network: %w", err)
 	}
 
-	for _, masterNode := range masterNodes {
+	for _, masterNode := range controlplaneNodes {
 		internalNodeIP, _, err := dnshelpers.GetPreferredInternalIPAddressForNodeName(network, masterNode)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get internal IP for node: %w", err)
